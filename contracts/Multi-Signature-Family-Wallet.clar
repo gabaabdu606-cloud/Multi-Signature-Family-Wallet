@@ -8,6 +8,10 @@
 (define-constant ERR_MEMBER_EXISTS (err u107))
 (define-constant ERR_MEMBER_NOT_FOUND (err u108))
 
+(define-constant ERR_NO_ALLOWANCE (err u109))
+(define-constant ERR_ALLOWANCE_EXCEEDED (err u110))
+(define-constant ERR_INVALID_PERIOD (err u111))
+
 (define-data-var next-tx-id uint u1)
 (define-data-var spending-threshold uint u1000000)
 
@@ -183,5 +187,78 @@
       recipient: (get recipient tx-data)
     })
     ERR_TRANSACTION_NOT_FOUND
+  )
+)
+
+
+
+(define-map member-allowances principal {amount: uint, period-blocks: uint, last-reset: uint})
+(define-map allowance-spent {member: principal, period: uint} uint)
+
+(define-read-only (get-allowance (member principal))
+  (map-get? member-allowances member)
+)
+
+(define-read-only (get-current-period (member principal))
+  (match (get-allowance member)
+    allowance-data (/ (- stacks-block-height (get last-reset allowance-data)) (get period-blocks allowance-data))
+    u0
+  )
+)
+
+(define-read-only (get-spent-this-period (member principal))
+  (default-to u0 (map-get? allowance-spent {member: member, period: (get-current-period member)}))
+)
+
+(define-read-only (get-available-allowance (member principal))
+  (match (get-allowance member)
+    allowance-data 
+    (let ((spent (get-spent-this-period member)))
+      (if (<= spent (get amount allowance-data))
+          (- (get amount allowance-data) spent)
+          u0
+      )
+    )
+    u0
+  )
+)
+
+(define-public (set-allowance (member principal) (amount uint) (period-blocks uint))
+  (begin
+    (asserts! (is-parent tx-sender) ERR_NOT_AUTHORIZED)
+    (asserts! (is-family-member member) ERR_MEMBER_NOT_FOUND)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> period-blocks u0) ERR_INVALID_PERIOD)
+    (map-set member-allowances member {
+      amount: amount,
+      period-blocks: period-blocks,
+      last-reset: stacks-block-height
+    })
+    (ok true)
+  )
+)
+
+(define-public (revoke-allowance (member principal))
+  (begin
+    (asserts! (is-parent tx-sender) ERR_NOT_AUTHORIZED)
+    (asserts! (is-some (get-allowance member)) ERR_NO_ALLOWANCE)
+    (map-delete member-allowances member)
+    (ok true)
+  )
+)
+
+(define-public (spend-from-allowance (recipient principal) (amount uint))
+  (let ((available (get-available-allowance tx-sender))
+        (current-period (get-current-period tx-sender))
+        (current-spent (get-spent-this-period tx-sender)))
+    (begin
+      (asserts! (is-family-member tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+      (asserts! (is-some (get-allowance tx-sender)) ERR_NO_ALLOWANCE)
+      (asserts! (<= amount available) ERR_ALLOWANCE_EXCEEDED)
+      (asserts! (<= amount (get-balance)) ERR_INSUFFICIENT_BALANCE)
+      (map-set allowance-spent {member: tx-sender, period: current-period} (+ current-spent amount))
+      (as-contract (stx-transfer? amount tx-sender recipient))
+    )
   )
 )
