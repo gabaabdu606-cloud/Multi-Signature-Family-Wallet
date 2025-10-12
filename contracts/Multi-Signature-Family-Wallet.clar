@@ -262,3 +262,75 @@
     )
   )
 )
+
+(define-constant ERR_TRANSACTION_EXPIRED (err u112))
+
+(define-data-var default-expiration-blocks uint u1440)
+
+(define-map transactions-v2
+  uint
+  {
+    recipient: principal,
+    amount: uint,
+    executed: bool,
+    votes: uint,
+    proposer: principal,
+    block-height: uint,
+    expiration-height: uint
+  }
+)
+
+(define-read-only (get-expiration-period)
+  (var-get default-expiration-blocks)
+)
+
+(define-read-only (is-transaction-expired (tx-id uint))
+  (match (map-get? transactions-v2 tx-id)
+    tx-data (>= stacks-block-height (get expiration-height tx-data))
+    false
+  )
+)
+
+(define-public (set-expiration-period (blocks uint))
+  (begin
+    (asserts! (is-parent tx-sender) ERR_NOT_AUTHORIZED)
+    (asserts! (> blocks u0) ERR_INVALID_PERIOD)
+    (var-set default-expiration-blocks blocks)
+    (ok true)
+  )
+)
+
+(define-public (propose-transaction-v2 (recipient principal) (amount uint))
+  (let ((tx-id (var-get next-tx-id))
+        (expiration (+ stacks-block-height (var-get default-expiration-blocks))))
+    (begin
+      (asserts! (is-family-member tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+      (asserts! (<= amount (get-balance)) ERR_INSUFFICIENT_BALANCE)
+      (map-set transactions-v2 tx-id {
+        recipient: recipient,
+        amount: amount,
+        executed: false,
+        votes: u0,
+        proposer: tx-sender,
+        block-height: stacks-block-height,
+        expiration-height: expiration
+      })
+      (var-set next-tx-id (+ tx-id u1))
+      (if (< amount (var-get spending-threshold))
+          (begin (try! (execute-transaction-v2 tx-id)) (ok tx-id))
+          (ok tx-id))
+    )
+  )
+)
+
+(define-private (execute-transaction-v2 (tx-id uint))
+  (let ((tx-data (unwrap! (map-get? transactions-v2 tx-id) ERR_TRANSACTION_NOT_FOUND)))
+    (begin
+      (asserts! (not (get executed tx-data)) ERR_TRANSACTION_EXECUTED)
+      (asserts! (not (is-transaction-expired tx-id)) ERR_TRANSACTION_EXPIRED)
+      (map-set transactions-v2 tx-id (merge tx-data {executed: true}))
+      (as-contract (stx-transfer? (get amount tx-data) tx-sender (get recipient tx-data)))
+    )
+  )
+)
