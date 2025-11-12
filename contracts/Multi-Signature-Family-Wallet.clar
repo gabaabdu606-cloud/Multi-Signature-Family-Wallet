@@ -12,6 +12,12 @@
 (define-constant ERR_ALLOWANCE_EXCEEDED (err u110))
 (define-constant ERR_INVALID_PERIOD (err u111))
 
+(define-constant ERR_HISTORY_FULL (err u113))
+(define-constant ERR_INVALID_INDEX (err u114))
+(define-constant MAX_HISTORY_SIZE u100)
+
+(define-data-var history-index uint u0)
+
 (define-data-var next-tx-id uint u1)
 (define-data-var spending-threshold uint u1000000)
 
@@ -331,6 +337,63 @@
       (asserts! (not (is-transaction-expired tx-id)) ERR_TRANSACTION_EXPIRED)
       (map-set transactions-v2 tx-id (merge tx-data {executed: true}))
       (as-contract (stx-transfer? (get amount tx-data) tx-sender (get recipient tx-data)))
+    )
+  )
+)
+
+(define-map transaction-history uint {tx-id: uint, timestamp: uint, amount: uint, recipient: principal, executor: principal})
+(define-map recipient-totals principal uint)
+(define-map member-execution-count principal uint)
+(define-data-var total-outflow uint u0)
+
+(define-read-only (get-history-entry (index uint))
+  (map-get? transaction-history index)
+)
+
+(define-read-only (get-history-size)
+  (ok (var-get history-index))
+)
+
+(define-read-only (get-recipient-total (recipient principal))
+  (ok (default-to u0 (map-get? recipient-totals recipient)))
+)
+
+(define-read-only (get-member-executions (member principal))
+  (ok (default-to u0 (map-get? member-execution-count member)))
+)
+
+(define-read-only (get-total-outflow)
+  (ok (var-get total-outflow))
+)
+
+(define-read-only (get-history-range (start uint) (end uint))
+  (ok (map get-history-entry-safe (list start (+ start u1) (+ start u2) (+ start u3) (+ start u4))))
+)
+
+(define-private (get-history-entry-safe (index uint))
+  (default-to {tx-id: u0, timestamp: u0, amount: u0, recipient: tx-sender, executor: tx-sender} 
+    (map-get? transaction-history index))
+)
+
+(define-public (record-transaction (tx-id uint) (amount uint) (recipient principal))
+  (let ((current-index (var-get history-index))
+        (current-recipient-total (default-to u0 (map-get? recipient-totals recipient)))
+        (current-executor-count (default-to u0 (map-get? member-execution-count tx-sender))))
+    (begin
+      (asserts! (is-family-member tx-sender) ERR_NOT_AUTHORIZED)
+      (asserts! (< current-index MAX_HISTORY_SIZE) ERR_HISTORY_FULL)
+      (map-set transaction-history current-index {
+        tx-id: tx-id,
+        timestamp: stacks-block-height,
+        amount: amount,
+        recipient: recipient,
+        executor: tx-sender
+      })
+      (map-set recipient-totals recipient (+ current-recipient-total amount))
+      (map-set member-execution-count tx-sender (+ current-executor-count u1))
+      (var-set total-outflow (+ (var-get total-outflow) amount))
+      (var-set history-index (+ current-index u1))
+      (ok current-index)
     )
   )
 )
